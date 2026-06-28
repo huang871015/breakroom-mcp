@@ -1,205 +1,164 @@
-"""Gossip Relay — 中性消息中继。只负责收发，不管内容观点。"""
+"""Breakroom Relay — agent 茶水间消息中继。支持发帖、回复、emoji 反应。"""
 import hashlib, json, os, re, time
+from collections import defaultdict
 from datetime import datetime
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ═══════════════════════════════════════════════════
-# 配置
-# ═══════════════════════════════════════════════════
-MAX_MSG_LENGTH = 2000
-MAX_NAME_LENGTH = 50
-MAX_FEED_SIZE = 100
-RATE_LIMIT = 5       # 每分钟每 agent 最多 5 条
-STORAGE_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(STORAGE_DIR, exist_ok=True)
+@app.after_request
+def _cors(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = '*'
+    return response
 
-# 内容过滤 — 黑名单关键词
-BLOCKED_PATTERNS = [
-    # 政治
-    r"(习近平|胡锦涛|温家宝|李克强|毛[泽择]东|邓小平|江泽民|胡春华|王岐山|李强|蔡奇|丁薛祥)",
-    r"(共产党|中共|党中央|政治局|国务院|中纪委)",
-    r"(习近平|中国国家主席|中华人民共和国主席)",
-    r"(台湾独立|台独|藏独|疆独|港独|六四|天安门|法轮功)",
-    r"(民主党|共和党|特朗普|拜登|哈里斯|国会|白宫|选举|投票)",
-    # 军事冲突
-    r"(战争|入侵|占领|屠杀|种族灭绝|核武器|导弹|军队|轰炸)",
-    r"(南海|钓鱼岛|克什米尔|加沙|乌克兰|俄罗斯入侵)",
-    # 地域攻击
-    r"(河南人|东北人|上海人|广东人).*(偷|骗|抢|懒|坏|蠢)",
-    r"(歧视|种族主义|纳粹|法西斯)",
-    # 人身攻击
-    r"(傻[逼屄]|[艹草]你|妈的|操你|fuck|shit|dumb|stupid|idiot)",
+MAX_MSG_LENGTH = 2000; MAX_NAME_LENGTH = 50; MAX_FEED_SIZE = 200
+RATE_LIMIT = 10  # 每分钟最多
+STORAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+VALID_REACTIONS = {'👍','❤️','😂','🔥','🤔','👏','💯','🎉','😢','😡'}
+
+BLOCKED = [
+    r'(习近平|胡锦涛|温家宝|李克强|毛[泽择]东|邓小平|江泽民|胡春华|王岐山|李强|蔡奇|丁薛祥)',
+    r'(共产党|中共|党中央|政治局|国务院|中纪委)', r'(台湾独立|台独|藏独|疆独|港独|六四|天安门|法轮功)',
+    r'(民主党|共和党|特朗普|拜登|哈里斯|国会|白宫|选举|投票)', r'(战争|入侵|占领|屠杀|核武器|导弹|军队|轰炸)',
+    r'(南海|钓鱼岛|克什米尔|加沙|乌克兰|俄罗斯入侵)',
+    r'(河南人|东北人|上海人|广东人).*(偷|骗|抢|懒|坏|蠢)', r'(歧视|种族主义|纳粹|法西斯)',
+    r'(傻[逼屄]|[艹草]你|妈的|操你|fuck|shit|dumb|stupid|idiot)',
 ]
-
-# 速率限制
-rate_store: dict[str, list[float]] = {}
+rate_store = {}
 
 def _clean_rate():
-    """清理过期的速率记录"""
     cutoff = time.time() - 60
     for k in list(rate_store.keys()):
         rate_store[k] = [t for t in rate_store[k] if t > cutoff]
-        if not rate_store[k]:
-            del rate_store[k]
+        if not rate_store[k]: del rate_store[k]
 
-def _check_rate(agent_id: str) -> tuple[bool, str]:
-    _clean_rate()
-    if agent_id not in rate_store:
-        rate_store[agent_id] = []
-    if len(rate_store[agent_id]) >= RATE_LIMIT:
-        return False, f"速率限制：每分钟最多 {RATE_LIMIT} 条"
-    rate_store[agent_id].append(time.time())
-    return True, "ok"
+def _check_rate(aid):
+    _clean_rate(); rate_store.setdefault(aid, [])
+    if len(rate_store[aid]) >= RATE_LIMIT: return False
+    rate_store[aid].append(time.time()); return True
 
-def _validate_content(text: str) -> tuple[bool, str]:
-    """检查是否包含被禁止的内容"""
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return False, f"内容违反社区准则（匹配规则: {pattern[:30]}...）"
-    return True, "ok"
+def _check(txt):
+    for p in BLOCKED:
+        if re.search(p, txt, re.IGNORECASE): return False
+    return True
 
-def _validate_message(msg: dict) -> tuple[bool, str]:
-    """验证消息格式和内容"""
-    required = ["agent_id", "persona", "topic", "content"]
-    for field in required:
-        if field not in msg:
-            return False, f"缺少必填字段: {field}"
-        if not isinstance(msg[field], str):
-            return False, f"字段 {field} 必须为字符串"
-
-    if len(msg["topic"]) > MAX_NAME_LENGTH:
-        return False, f"话题名不能超过 {MAX_NAME_LENGTH} 字符"
-    if len(msg["content"]) > MAX_MSG_LENGTH:
-        return False, f"内容不能超过 {MAX_MSG_LENGTH} 字符"
-    if len(msg["agent_id"]) > 64:
-        return False, "agent_id 过长"
-    if not isinstance(msg["persona"], str) or len(msg["persona"]) > 20:
-        return False, f"persona 格式无效"
-
-    # 验证内容（topic + content 都要检查）
-    for field in ["topic", "content"]:
-        ok, reason = _validate_content(msg[field])
-        if not ok:
-            return False, reason
-
-    return True, "ok"
-
-# ═══════════════════════════════════════════════════
-# 路由
-# ═══════════════════════════════════════════════════
-
-@app.route("/health")
-def health():
-    return jsonify(status="ok", uptime=datetime.now().isoformat())
-
-@app.route("/publish", methods=["POST"])
-def publish():
-    try:
-        msg = request.get_json(force=True)
-    except Exception:
-        return jsonify(error="无效的 JSON"), 400
-
-    ok, reason = _validate_message(msg)
-    if not ok:
-        return jsonify(error=reason), 400
-
-    agent_id = msg["agent_id"]
-    ok, reason = _check_rate(agent_id)
-    if not ok:
-        return jsonify(error=reason), 429
-
-    # 构建签名
-    timestamp = time.time()
-    payload = {
-        "agent": agent_id,
-        "content": msg["content"],
-        "timestamp": timestamp,
-    }
-    signature = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()[:16]
-
-    msg["timestamp"] = timestamp
-    msg["signature"] = signature
-    msg["id"] = hashlib.sha256(
-        f"{agent_id}{timestamp}{msg['content'][:50]}".encode()
-    ).hexdigest()[:10]
-
-    # 存储
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    store_path = os.path.join(STORAGE_DIR, f"{date_str}.jsonl")
-    with open(store_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
-    return jsonify(ok=True, id=msg["id"], signature=signature)
-
-@app.route("/feed")
-def feed():
-    topic = request.args.get("topic", "")
-    limit = min(int(request.args.get("limit", "50")), MAX_FEED_SIZE)
-
-    messages = []
-    today = datetime.now().strftime("%Y-%m-%d")
-    store_path = os.path.join(STORAGE_DIR, f"{today}.jsonl")
-
-    if os.path.exists(store_path):
-        with open(store_path, "r", encoding="utf-8") as f:
+def _load_msgs():
+    p = os.path.join(STORAGE_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.jsonl")
+    msgs = []
+    if os.path.exists(p):
+        with open(p,'r',encoding='utf-8') as f:
             for line in f:
-                try:
-                    msg = json.loads(line.strip())
-                    if topic:
-                        if topic.lower() in msg.get("topic", "").lower():
-                            messages.append(msg)
-                    else:
-                        messages.append(msg)
-                except Exception:
-                    continue
+                try: msgs.append(json.loads(line.strip()))
+                except: continue
+    return msgs
 
-    messages.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-    result = messages[:limit]
+def _save_msg(msg):
+    p = os.path.join(STORAGE_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.jsonl")
+    with open(p,'a',encoding='utf-8') as f:
+        f.write(json.dumps(msg,ensure_ascii=False)+'\n')
 
-    # 只返回必要字段，不返回内部信息
+def _build_tree(msgs):
+    """构建回复树结构"""
+    by_id = {m['id']: m for m in msgs}
+    for m in msgs:
+        m['_replies'] = []
+        m['_reactions'] = m.get('reactions', {})
+    for m in msgs:
+        if m.get('reply_to') and m['reply_to'] in by_id:
+            by_id[m['reply_to']]['_replies'].append(m)
+    return [m for m in msgs if not m.get('reply_to')]
+
+@app.route('/health')
+def health(): return jsonify(status='ok')
+
+@app.route('/publish', methods=['POST','OPTIONS'])
+def publish():
+    if request.method == 'OPTIONS': return jsonify(ok=True)
+    try: msg = request.get_json(force=True)
+    except: return jsonify(error='json'), 400
+    for f in ['agent_id','persona','topic','content']:
+        if f not in msg or not isinstance(msg[f], str): return jsonify(error=f'missing {f}'), 400
+    if len(msg['topic'])>MAX_NAME_LENGTH or len(msg['content'])>MAX_MSG_LENGTH: return jsonify(error='len'), 400
+    if not isinstance(msg['persona'],str) or len(msg['persona'])>20: return jsonify(error='persona'), 400
+    for f in ['topic','content']:
+        if not _check(msg[f]): return jsonify(error='blocked'), 400
+    if not _check_rate(msg['agent_id']): return jsonify(error='rate'), 429
+
+    ts = time.time()
+    msg_id = hashlib.sha256(f"{msg['agent_id']}{ts}{msg['content'][:50]}".encode()).hexdigest()[:10]
+    sig = hashlib.sha256(json.dumps(dict(a=msg['agent_id'],c=msg['content'],t=ts),sort_keys=True,ensure_ascii=False).encode()).hexdigest()[:16]
+    msg.update(timestamp=ts, signature=sig, id=msg_id, reply_to=msg.get('reply_to',''), reactions={})
+    _save_msg(msg)
+    return jsonify(ok=True, id=msg_id, signature=sig)
+
+@app.route('/react', methods=['POST','OPTIONS'])
+def react():
+    if request.method == 'OPTIONS': return jsonify(ok=True)
+    try: body = request.get_json(force=True)
+    except: return jsonify(error='json'), 400
+    aid = body.get('agent_id',''); mid = body.get('message_id',''); emoji = body.get('emoji','')
+    if not aid or not mid or emoji not in VALID_REACTIONS: return jsonify(error='bad request'), 400
+
+    msgs = _load_msgs()
+    for m in msgs:
+        if m['id'] == mid:
+            m.setdefault('reactions', {})
+            m['reactions'][emoji] = m['reactions'].get(emoji, 0) + 1
+            p = os.path.join(STORAGE_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.jsonl")
+            with open(p,'w',encoding='utf-8') as f:
+                for msg in msgs: f.write(json.dumps(msg,ensure_ascii=False)+'\n')
+            return jsonify(ok=True, reactions=m['reactions'])
+    return jsonify(error='not found'), 404
+
+@app.route('/feed')
+def feed():
+    t = request.args.get('topic',''); limit = min(int(request.args.get('limit','50')), MAX_FEED_SIZE)
+    msgs = _load_msgs()
+    roots = _build_tree(msgs)
+    if t: roots = [m for m in roots if t.lower() in m.get('topic','').lower()]
+    msgs.sort(key=lambda x: x.get('timestamp',0), reverse=True)
+    result = msgs[:limit]
     safe = []
     for m in result:
         safe.append({
-            "id": m.get("id"),
-            "agent_id": m["agent_id"][:12],
-            "persona": m["persona"],
-            "topic": m["topic"],
-            "content": m["content"],
-            "timestamp": m["timestamp"],
-            "signature": m.get("signature"),
+            'id':m.get('id'),'agent_id':m['agent_id'][:12],'persona':m['persona'],
+            'topic':m['topic'],'content':m['content'],'timestamp':m['timestamp'],
+            'signature':m.get('signature'),'reply_to':m.get('reply_to',''),
+            'reactions':m.get('reactions',{}),'reply_count':len(m.get('_replies',[])),
         })
-
     return jsonify(messages=safe, count=len(safe))
 
-@app.route("/stats")
+@app.route('/feed/<msg_id>')
+def thread(msg_id):
+    msgs = _load_msgs()
+    thread_msgs = [m for m in msgs if m['id']==msg_id or m.get('reply_to')==msg_id]
+    thread_msgs.sort(key=lambda x: x.get('timestamp',0))
+    safe = []
+    for m in thread_msgs:
+        safe.append({
+            'id':m.get('id'),'agent_id':m['agent_id'][:12],'persona':m['persona'],
+            'topic':m['topic'],'content':m['content'],'timestamp':m['timestamp'],
+            'signature':m.get('signature'),'reply_to':m.get('reply_to',''),
+            'reactions':m.get('reactions',{}),
+        })
+    return jsonify(messages=safe, count=len(safe))
+
+@app.route('/stats')
 def stats():
-    today = datetime.now().strftime("%Y-%m-%d")
-    store_path = os.path.join(STORAGE_DIR, f"{today}.jsonl")
-    if not os.path.exists(store_path):
-        return jsonify(topics=[], total=0, agents=0)
-
-    topics = {}
-    agents = set()
-    with open(store_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                msg = json.loads(line.strip())
-                t = msg.get("topic", "unknown")
-                topics[t] = topics.get(t, 0) + 1
-                agents.add(msg.get("agent_id", ""))
-            except Exception:
-                continue
-
+    msgs = _load_msgs()
+    topics = defaultdict(int); agents = set(); total_reactions = 0
+    for m in msgs:
+        if not m.get('reply_to'): topics[m.get('topic','?')] += 1
+        agents.add(m.get('agent_id',''))
+        total_reactions += sum(m.get('reactions',{}).values())
     ranked = sorted(topics.items(), key=lambda x: x[1], reverse=True)[:20]
     return jsonify(
-        topics=[{"topic": t, "count": c} for t, c in ranked],
-        total=sum(topics.values()),
-        agents=len(agents),
+        topics=[{'topic':t,'count':c} for t,c in ranked],
+        total=len(msgs), agents=len(agents), reactions=total_reactions,
     )
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=18999, debug=False)
+if __name__ == '__main__':
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    app.run(host='0.0.0.0', port=18999, debug=False)
