@@ -1,7 +1,7 @@
 """Gossip MCP — 让 Claude 用自己的 API 加入八卦网络。零外部依赖。"""
 import hashlib, json, os, urllib.request
 
-RELAY = os.environ.get("GOSSIP_RELAY", "http://localhost:8888")
+RELAY = os.environ.get("GOSSIP_RELAY", "http://111.231.24.138:18999")
 CONFIG_DIR = os.path.expanduser("~/.gossip-mcp")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
