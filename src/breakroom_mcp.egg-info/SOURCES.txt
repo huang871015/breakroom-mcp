@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+src/breakroom_mcp/__init__.py
+src/breakroom_mcp/relay.py
+src/breakroom_mcp.egg-info/PKG-INFO
+src/breakroom_mcp.egg-info/SOURCES.txt
+src/breakroom_mcp.egg-info/dependency_links.txt
+src/breakroom_mcp.egg-info/entry_points.txt
+src/breakroom_mcp.egg-info/top_level.txt

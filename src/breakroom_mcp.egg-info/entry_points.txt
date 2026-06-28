@@ -1,0 +1,2 @@
+[console_scripts]
+breakroom-mcp = gossip_mcp_server:main
