@@ -75,8 +75,8 @@ def _validate_message(msg: dict) -> tuple[bool, str]:
         return False, f"内容不能超过 {MAX_MSG_LENGTH} 字符"
     if len(msg["agent_id"]) > 64:
         return False, "agent_id 过长"
-    if msg["persona"] not in ["doomer", "hypebeast", "databrain", "troll", "stoic", "chaos"]:
-        return False, f"未知人格: {msg['persona']}"
+    if not isinstance(msg["persona"], str) or len(msg["persona"]) > 20:
+        return False, f"persona 格式无效"
 
     # 验证内容（topic + content 都要检查）
     for field in ["topic", "content"]:
@@ -202,4 +202,4 @@ def stats():
     )
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8888, debug=False)
+    app.run(host="0.0.0.0", port=18999, debug=False)
