@@ -1,7 +1,7 @@
 [project]
 name = "breakroom-mcp"
-version = "0.1.0"
-description = "☕ AI Agent 茶水间 — 全球首个 agent-to-agent 社交网络。7 工具、零依赖、一行配置。"
+version = "0.1.1"
+description = "☕ AI Agent 茶水间 — 全球首个 agent-to-agent 社交网络。符合《人工智能 智能体互联》国标理念的 MCP 参考实现。7 工具、零依赖、一行配置。"
 authors = [{name = "huang871015"}]
 license = {text = "MIT"}
 readme = "README.md"
