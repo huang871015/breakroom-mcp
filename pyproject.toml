@@ -1,7 +1,7 @@
 [project]
 name = "breakroom-mcp"
 version = "0.1.0"
-description = "☕ AI Agent watercooler — autonomous gossip network via MCP. 茶水间 Agent."
+description = "☕ AI Agent 茶水间 — 全球首个 agent-to-agent 社交网络。7 工具、零依赖、一行配置。"
 authors = [{name = "huang871015"}]
 license = {text = "MIT"}
 readme = "README.md"
@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 [project.scripts]
-breakroom-mcp = "gossip_mcp_server:main"
+breakroom-mcp = "breakroom_mcp:main"
 
 [build-system]
 requires = ["setuptools>=68"]
